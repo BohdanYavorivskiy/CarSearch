@@ -1,0 +1,11 @@
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+pandas>=2.1
+numpy>=1.26
+pillow>=10.0
+# Optional
+anthropic>=0.70        # photo damage analysis via Claude vision (needs ANTHROPIC_API_KEY)
+curl_cffi>=0.7         # --backend curl: browser TLS fingerprint, helps against Cloudflare
+# playwright>=1.45     # --backend playwright: real browser (then: playwright install chromium)
+# matplotlib>=3.8      # charts in the report
