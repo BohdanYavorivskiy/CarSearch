@@ -9,7 +9,13 @@ on:
         description: "manual / automatic / any"
         default: "any"
       year_from:
-        description: "min year (empty = all)"
+        description: "min year"
+        default: "2016"
+      roof:
+        description: "soft / hard / any"
+        default: "any"
+      trim:
+        description: "comma list: sport,club,grand_touring (empty = all)"
         default: ""
       max_pages:
         description: "listing pages per model slug"
@@ -39,8 +45,9 @@ jobs:
           BIDFAX_COOKIE: ${{ secrets.BIDFAX_COOKIE }}
           BIDFAX_USER_AGENT: ${{ secrets.BIDFAX_USER_AGENT }}
         run: |
-          ARGS="--transmission ${{ inputs.transmission || 'any' }} --max-pages ${{ inputs.max_pages || '20' }}"
-          if [ -n "${{ inputs.year_from }}" ]; then ARGS="$ARGS --year-from ${{ inputs.year_from }}"; fi
+          ARGS="--transmission ${{ inputs.transmission || 'any' }} --roof ${{ inputs.roof || 'any' }}"
+          ARGS="$ARGS --year-from ${{ inputs.year_from || '2016' }} --max-pages ${{ inputs.max_pages || '20' }}"
+          for t in $(echo "${{ inputs.trim }}" | tr ',' ' '); do ARGS="$ARGS --trim $t"; done
           python -m carsearch scrape --backend playwright $ARGS || python -m carsearch scrape --backend curl $ARGS
 
       - name: Photo damage analysis (only if ANTHROPIC_API_KEY secret is set)

@@ -8,7 +8,7 @@
 
 ```bash
 pip install -r requirements.txt
-python -m carsearch scrape --transmission manual --year-from 2006   # збір
+python -m carsearch scrape --transmission manual --roof soft --trim club   # збір (2016+ за замовчуванням)
 python -m carsearch photos --limit 20                               # аналіз фото (потрібен ANTHROPIC_API_KEY)
 python -m carsearch report                                          # reports/report.md
 ```
@@ -17,7 +17,10 @@ python -m carsearch report                                          # reports/re
 | параметр | значення |
 |---|---|
 | `--transmission` | `manual`, `automatic`, `any` (за замовчуванням) |
-| `--year-from`, `--year-to` | діапазон років випуску |
+| `--year-from`, `--year-to` | діапазон років випуску; за замовчуванням `--year-from 2016` (покоління ND), `0` знімає обмеження |
+| `--roof` | `soft` (м'який дах), `hard` (твердий: RF / PRHT), `any` |
+| `--trim` | `sport`, `club`, `grand_touring`, `other`; можна кілька: `--trim club --trim grand_touring` |
+| `--include-unknown` | не відкидати лоти, де дах / версію / коробку не вдалося визначити |
 | `--max-pages` | скільки сторінок списку обходити (20 за замовчуванням) |
 | `--model` | slug моделі на bidfax (за замовчуванням `mx-5-miata` і `mx-5`) |
 | `--refresh` | перезавантажити вже збережені лоти |
@@ -25,6 +28,22 @@ python -m carsearch report                                          # reports/re
 Повторні запуски **інкрементальні**: вже відомі лоти не завантажуються повторно,
 обхід зупиняється після 2 сторінок без нових лотів.
 Лоти, що не пройшли фільтр, пишуться в `data/skipped.json` і теж не завантажуються вдруге.
+
+### Як визначаються дах і версія
+
+Спершу з назви лота (`... Rf Grand Touring 2019 ...`), а якщо там нічого немає, то з VIN (для ND, 2016+):
+
+| VIN | дах | версія |
+|---|---|---|
+| `JM1NDAB…` | м'який | Sport |
+| `JM1NDAC…` | м'який | Club |
+| `JM1NDAD…` | м'який | Grand Touring |
+| `JM1NDAL…` | твердий (RF) | Club |
+| `JM1NDAM…` | твердий (RF) | Grand Touring |
+
+У лоті записуються поля `roof`, `trim`, `variant_source` (`title` / `vin`) і `variant_conflict`.
+Останнє дорівнює `true`, коли назва і VIN не збігаються; такі лоти варто перевірити вручну.
+Фільтр відсікає лоти вже за карткою в списку (там є назва і VIN), тож зайві сторінки не завантажуються.
 
 ## Що зберігається
 
@@ -50,7 +69,8 @@ python -m carsearch report                                          # reports/re
 
 ## Аналіз
 
-OLS на `log(ціна)`: `вік + пробіг/10k миль + damage_score + механіка + покоління (+ photo severity)`.
+OLS на `log(ціна)`: `вік + пробіг/10k миль + damage_score + механіка + твердий дах + версія + покоління (+ photo severity)`.
+Звіт також містить таблиці цін за дахом і версією.
 Коефіцієнт читається як відсоток зміни ціни: наприклад, `mileage_10k = -0.03` означає приблизно −3% за кожні 10 тис. миль.
 
 ## Cloudflare

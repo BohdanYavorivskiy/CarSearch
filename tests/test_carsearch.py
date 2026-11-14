@@ -7,7 +7,8 @@ from pathlib import Path
 from carsearch.analyze import report
 from carsearch.damage import text_damage_score
 from carsearch.parse import mileage_km, next_page_url, normalize_transmission, parse_listing, parse_lot
-from carsearch.scrape import scrape
+from carsearch import variants
+from carsearch.scrape import Filters, scrape
 from carsearch.storage import Store
 
 FX = Path(__file__).parent / "fixtures"
@@ -83,26 +84,98 @@ class DamageTests(unittest.TestCase):
         self.assertLess(front, burn)
 
 
+ND_LOTS = {
+    # lot_id: (title, vin, transmission)
+    "50000001": ("Mazda Mx-5 Miata Rf Grand Touring 2019 Red", "JM1NDAM75K0300001", "Manual"),
+    "50000002": ("Mazda Mx-5 Miata Club 2017 White", "JM1NDAC70H0100002", "Manual"),
+    "50000003": ("Mazda Mx-5 Miata Sport 2016 Blue", "JM1NDAB78G0100003", "Automatic"),
+    "50000004": ("Mazda Mx-5 Miata 2018 Grey", "JM1NDAD71J0100004", "Automatic"),  # trim only in VIN
+    "50000005": ("Mazda Mx-5 Miata 2008 Black", "JM1NC26F080155907", "Automatic"),
+}
+
+
+def _slug(title):
+    return title.lower().replace(" ", "-")
+
+
+def nd_url(lot_id):
+    t, vin, _ = ND_LOTS[lot_id]
+    return f"https://bidfax.info/mazda/mx-5-miata/{lot_id}-{_slug(t)}-vin-{vin.lower()}.html"
+
+
+class NDFetcher(FakeFetcher):
+    """Listing with 5 lots of different variants; each lot page is lot.html with values swapped."""
+
+    def get(self, url, use_cache=True):
+        self.calls.append(url)
+        card = (FX / "listing.html").read_text()
+        if url == LIST_URL:
+            links = "".join(
+                f'<div class="thumbnail offer"><div class="caption"><a href="{nd_url(i)}">'
+                f"<heading>{t} vin: {v}</heading></a></div><span class=\"prices\">{9000 + n * 1000}</span></div>"
+                for n, (i, (t, v, _)) in enumerate(ND_LOTS.items())
+            )
+            return f"<html><body>{links}</body></html>"
+        if "/page/" in url or url.rstrip("/").endswith(("mx-5", "mx-5-miata-rf")):
+            return "<html><body></body></html>"
+        lot_id = url.rsplit("/", 1)[1].split("-")[0]
+        t, vin, tr = ND_LOTS[lot_id]
+        year = next(w for w in t.split() if w.isdigit())
+        html = (FX / "lot.html").read_text()
+        return (html.replace("Mazda Mx-5 Miata 2008 Black", t).replace("JM1NC26F080155907", vin)
+                .replace(">2008<", f">{year}<").replace(">Automatic<", f">{tr}<"))
+
+
+def run(store, fetcher=None, **kw):
+    return scrape(fetcher or NDFetcher(), store, filters=Filters(**kw))
+
+
+class VariantTests(unittest.TestCase):
+    def test_detect(self):
+        self.assertEqual(variants.from_text("Mazda Mx-5 Miata Rf Grand Touring 2019"), ("hard", "grand_touring"))
+        self.assertEqual(variants.from_text("mazda-mx-5-miata-club-2017-white"), (None, "club"))
+        self.assertEqual(variants.from_vin("JM1NDAB78G0100003"), ("soft", "sport"))
+        self.assertEqual(variants.from_vin("JM1NDAM75K0300001"), ("hard", "grand_touring"))
+        self.assertEqual(variants.from_vin("JM1NC25F490202195"), ("soft", None))
+        d = variants.detect({"title": "Mazda Mx-5 Miata 2018 Grey", "vin": "JM1NDAD71J0100004"})
+        self.assertEqual((d["roof"], d["trim"], d["variant_source"]), ("soft", "grand_touring", "vin"))
+        d = variants.detect({"title": "Mazda Mx-5 Miata Club 2017", "vin": "JM1NDAD71J0100004"})
+        self.assertTrue(d["variant_conflict"])
+
+
 class PipelineTests(unittest.TestCase):
-    def test_scrape_filters_and_report(self):
+    def kept(self, **kw):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(tmp)
-            # year 2010+ drops the 2008 card before its lot page is fetched
-            stats = scrape(FakeFetcher(), store, model_slugs=["mx-5-miata"], year_from=2010, transmission="any")
-            self.assertEqual(stats["kept"], 0)  # the 2015 card's lot page says 2008 -> filtered
-            f = FakeFetcher()
-            stats = scrape(f, store, model_slugs=["mx-5-miata"], transmission="manual")
-            self.assertEqual(stats["kept"], 0)  # fixture is automatic
-            f = FakeFetcher()
-            scrape(f, store, model_slugs=["mx-5-miata"], transmission="manual")
-            self.assertEqual([u for u in f.calls if "/page/" not in u and u != LIST_URL], [])  # rejected lots not refetched
-            stats = scrape(FakeFetcher(), store, model_slugs=["mx-5-miata"], transmission="automatic")
-            self.assertEqual(stats["kept"], 2)  # both cards (fixture lot page reused)
+            run(store, **kw)
+            return sorted(store.lots)
+
+    def test_default_is_2016_plus(self):
+        self.assertEqual(self.kept(), ["50000001", "50000002", "50000003", "50000004"])
+
+    def test_filters(self):
+        self.assertEqual(self.kept(roof="hard"), ["50000001"])
+        self.assertEqual(self.kept(roof="soft"), ["50000002", "50000003", "50000004"])
+        self.assertEqual(self.kept(trims=["club", "grand_touring"]), ["50000001", "50000002", "50000004"])
+        self.assertEqual(self.kept(trims=["sport"]), ["50000003"])
+        self.assertEqual(self.kept(transmission="manual", roof="soft"), ["50000002"])
+        self.assertEqual(self.kept(year_from=None, roof="hard"), ["50000001", "50000005"])  # NC PRHT
+
+    def test_prefilter_and_incremental(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            f = NDFetcher()
+            run(store, f, roof="hard")
+            lot_calls = [u for u in f.calls if u.endswith(".html")]
+            self.assertEqual(lot_calls, [nd_url("50000001")])  # others rejected from the card alone
             self.assertTrue((Path(tmp) / "lots.csv").exists())
-            # incremental: a second run fetches no lot pages
-            f = FakeFetcher()
-            scrape(f, store, model_slugs=["mx-5-miata"], transmission="automatic")
-            self.assertFalse(any(u.endswith(".html") and "/page/" not in u and u != LIST_URL for u in f.calls))
+            f = NDFetcher()
+            run(store, f, roof="hard")
+            self.assertEqual([u for u in f.calls if u.endswith(".html")], [])  # nothing refetched
+            f = NDFetcher()
+            run(store, f, transmission="manual")  # different filter -> skipped lots become eligible
+            self.assertIn(nd_url("50000002"), f.calls)
+            self.assertEqual(sorted(store.lots), ["50000001", "50000002"])
 
     def test_report_on_synthetic_data(self):
         rnd = random.Random(1)
@@ -112,7 +185,8 @@ class PipelineTests(unittest.TestCase):
             miles = rnd.randint(10_000, 200_000)
             dmg = rnd.choice(["Normal Wear", "Front End", "Rear End", "Side", "Burn"])
             manual = rnd.random() < 0.5
-            lot = {"lot_id": str(i), "year": year, "mileage_mi": miles, "primary_damage": dmg,
+            lot = {"lot_id": str(i), "year": year, "roof": rnd.choice(["soft", "hard"]),
+                   "trim": rnd.choice(["sport", "club", "grand_touring"]), "mileage_mi": miles, "primary_damage": dmg,
                    "transmission_norm": "manual" if manual else "automatic",
                    "generation": "NA" if year < 1998 else "NB" if year < 2006 else "NC" if year < 2016 else "ND"}
             lot["text_damage_score"] = text_damage_score(lot)

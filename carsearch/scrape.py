@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .damage import text_damage_score
 from .fetch import Fetcher
 from .parse import BASE, next_page_url, parse_listing, parse_lot
 from .storage import Store
+from .variants import detect
 
 log = logging.getLogger(__name__)
 
 # bidfax uses several slugs for the same car over the years
-DEFAULT_MODEL_SLUGS = ["mx-5-miata", "mx-5"]
+DEFAULT_MODEL_SLUGS = ["mx-5-miata", "mx-5", "mx-5-miata-rf"]  # a missing slug is skipped (404)
 
 
 def listing_url(make: str, model_slug: str, page: int) -> str:
@@ -20,14 +22,38 @@ def listing_url(make: str, model_slug: str, page: int) -> str:
     return base if page == 1 else f"{base}page/{page}/"
 
 
-def matches(lot: dict, year_from: int | None, year_to: int | None, transmission: str | None) -> bool:
+@dataclass
+class Filters:
+    year_from: int | None = 2016
+    year_to: int | None = None
+    transmission: str | None = None  # manual / automatic / None = any
+    roof: str | None = None  # soft / hard / None = any
+    trims: list[str] = field(default_factory=list)  # sport / club / grand_touring / other; empty = any
+    include_unknown: bool = False  # keep lots whose roof / trim / transmission could not be determined
+
+
+def matches(lot: dict, f: Filters, partial: bool = False) -> bool:
+    """``partial=True`` is for listing cards and the skip registry: a missing value is
+    not a reason to reject, because the lot page may still provide it."""
     y = lot.get("year")
-    if year_from and (y is None or y < year_from):
-        return False
-    if year_to and (y is None or y > year_to):
-        return False
-    if transmission and transmission != "any":
-        if lot.get("transmission_norm") != transmission:
+    if y is None:
+        if not partial and (f.year_from or f.year_to):
+            return False
+    else:
+        if f.year_from and y < f.year_from:
+            return False
+        if f.year_to and y > f.year_to:
+            return False
+    for key, wanted in (("transmission_norm", {f.transmission} if f.transmission else None),
+                        ("roof", {f.roof} if f.roof else None),
+                        ("trim", set(f.trims) if f.trims else None)):
+        if not wanted:
+            continue
+        val = lot.get(key)
+        if val is None:
+            if not (partial or f.include_unknown):
+                return False
+        elif val not in wanted:
             return False
     return True
 
@@ -37,15 +63,14 @@ def scrape(
     store: Store,
     make: str = "mazda",
     model_slugs: list[str] | None = None,
-    year_from: int | None = None,
-    year_to: int | None = None,
-    transmission: str | None = None,
+    filters: Filters | None = None,
     max_pages: int = 20,
     stop_after_known: int = 2,
     refresh: bool = False,
 ) -> dict:
     """Walk listing pages newest→oldest. Stops when ``stop_after_known`` pages in a row
     contain only lots we already have (incremental updates), or after ``max_pages``."""
+    f = filters or Filters()
     stats = {"pages": 0, "seen": 0, "new": 0, "kept": 0, "filtered_out": 0, "errors": 0}
     for slug in model_slugs or DEFAULT_MODEL_SLUGS:
         url: str | None = listing_url(make, slug, 1)
@@ -67,9 +92,10 @@ def scrape(
             new_on_page = sum(1 for st in stubs if st["lot_id"] not in store and st["lot_id"] not in store.skipped)
             for stub in stubs:
                 stats["seen"] += 1
-                # cheap pre-filter by year from the card title, saves a request
-                if not matches(stub, year_from, year_to, None) and stub.get("year"):
-                    store.skipped.setdefault(stub["lot_id"], {"year": stub["year"], "transmission_norm": None})
+                # cheap pre-filter on the card title (year, RF, trim, VIN), saves a request
+                stub.update({k: v for k, v in detect(stub).items() if k in ("roof", "trim")})
+                if not matches(stub, f, partial=True):
+                    store.skipped.setdefault(stub["lot_id"], {k: stub.get(k) for k in ("year", "roof", "trim")})
                     stats["filtered_out"] += 1
                     continue
                 if not refresh:
@@ -77,9 +103,7 @@ def scrape(
                         continue
                     prev = store.skipped.get(stub["lot_id"])
                     # already fetched once and rejected by the *current* filters -> don't refetch
-                    if prev is not None and not matches(
-                        prev, year_from, year_to, transmission if prev.get("transmission_norm") else None
-                    ):
+                    if prev is not None and not matches(prev, f, partial=True):
                         continue
                 try:
                     lot = parse_lot(fetcher.get(stub["url"]), stub["url"])
@@ -93,8 +117,9 @@ def scrape(
                 lot["listing_thumb"] = stub.get("thumb")
                 lot["scraped_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 lot["text_damage_score"] = text_damage_score(lot)
+                lot.update(detect(lot))
                 stats["new"] += 1
-                if matches(lot, year_from, year_to, transmission):
+                if matches(lot, f):
                     store.upsert(lot)
                     stats["kept"] += 1
                 else:

@@ -37,6 +37,8 @@ def load(data_dir: str | Path = "data") -> pd.DataFrame:
                 "price": lot.get("price_usd"),
                 "mileage_mi": lot.get("mileage_mi"),
                 "transmission": lot.get("transmission_norm"),
+                "roof": lot.get("roof"),
+                "trim": lot.get("trim"),
                 "primary_damage": lot.get("primary_damage"),
                 "damage_score": lot.get("text_damage_score"),
                 "photo_severity": pdmg.get("severity"),
@@ -44,7 +46,7 @@ def load(data_dir: str | Path = "data") -> pd.DataFrame:
             }
         )
     df = pd.DataFrame(rows, columns=["lot_id", "url", "title", "sale_date", "sale_status", "year", "generation", "price",
-                                     "mileage_mi", "transmission", "primary_damage", "damage_score", "photo_severity", "repair_cost"])
+                                     "mileage_mi", "transmission", "roof", "trim", "primary_damage", "damage_score", "photo_severity", "repair_cost"])
     for c in ("year", "price", "mileage_mi", "damage_score", "photo_severity", "repair_cost"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
@@ -79,6 +81,16 @@ def build_design(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Serie
     if d["photo_severity"].notna().mean() >= 0.5:
         d["photo_sev"] = d["photo_severity"].fillna(d["photo_severity"].median())
         cols.append("photo_sev")
+    d["hard_top"] = (d["roof"] == "hard").astype(float)
+    cols.append("hard_top")
+    # trim dummies, baseline = the most common trim
+    trims = d["trim"].dropna()
+    if trims.nunique() > 1:
+        base = trims.value_counts().idxmax()
+        for t in sorted(trims.unique()):
+            if t != base:
+                d[f"trim_{t}"] = (d["trim"] == t).astype(float)
+                cols.append(f"trim_{t}")
     gens = sorted(g for g in d["generation"].dropna().unique())
     for g in gens[1:]:  # first generation is the baseline
         d[f"gen_{g}"] = (d["generation"] == g).astype(float)
@@ -94,7 +106,16 @@ EXPLAIN = {
     "damage": "damage score 0→1 (з кодів пошкоджень аукціону)",
     "manual": "механіка vs автомат",
     "photo_sev": "+1 бал серйозності за фото (0-10)",
+    "hard_top": "твердий дах (RF) vs м'який",
 }
+
+
+def explain(name: str) -> str:
+    if name.startswith("trim_"):
+        return "версія vs найпоширеніша"
+    if name.startswith("gen_"):
+        return "покоління vs базове"
+    return EXPLAIN.get(name, "")
 
 
 def report(data_dir: str | Path = "data", out_dir: str | Path = "reports") -> str:
@@ -118,7 +139,7 @@ def report(data_dir: str | Path = "data", out_dir: str | Path = "reports") -> st
             rows.append(f"| {idx} | {int(r['count'])} | {r['median']:.0f} | {r['mean']:.0f} | {r['min']:.0f} | {r['max']:.0f} |")
         return rows
 
-    for grp, title in (("generation", "За поколінням"), ("transmission", "За коробкою"), ("year", "За роком"), ("primary_damage", "За основним пошкодженням")):
+    for grp, title in (("generation", "За поколінням"), ("transmission", "За коробкою"), ("roof", "За дахом"), ("trim", "За версією"), ("year", "За роком"), ("primary_damage", "За основним пошкодженням")):
         if df[grp].notna().any():
             lines += [f"## {title}", "", *table(grp), ""]
 
@@ -131,17 +152,17 @@ def report(data_dir: str | Path = "data", out_dir: str | Path = "reports") -> st
             if name == "intercept":
                 continue
             eff = (math.exp(b) - 1) * 100
-            lines.append(f"| {name} | {b:+.4f} | {m['se'][name]:.4f} | {eff:+.1f}% | {EXPLAIN.get(name, 'покоління vs базове')} |")
+            lines.append(f"| {name} | {b:+.4f} | {m['se'][name]:.4f} | {eff:+.1f}% | {explain(name)} |")
         lines += ["", "_Ефект = зміна ціни при зміні фактора на 1 одиницю за інших рівних._", ""]
 
         d = d.assign(fitted_price=np.exp(m["fitted"]), resid=m["resid"])
         d["vs_model_pct"] = (np.exp(d["resid"]) - 1) * 100
-        cols = ["lot_id", "year", "transmission", "mileage_mi", "primary_damage", "damage_score", "photo_severity", "price", "fitted_price", "vs_model_pct", "url"]
+        cols = ["lot_id", "year", "trim", "roof", "transmission", "mileage_mi", "primary_damage", "damage_score", "photo_severity", "price", "fitted_price", "vs_model_pct", "url"]
         d.sort_values("resid")[cols].to_csv(out / "residuals.csv", index=False)
-        lines += ["## Найдешевші відносно моделі (потенційно вигідні)", "", "| лот | рік | КПП | пробіг mi | пошкодження | ціна $ | модель $ | Δ |", "|---|---|---|---|---|---|---|---|"]
+        lines += ["## Найдешевші відносно моделі (потенційно вигідні)", "", "| лот | рік | версія | дах | КПП | пробіг mi | пошкодження | ціна $ | модель $ | Δ |", "|---|---|---|---|---|---|---|---|---|---|"]
         for _, r in d.sort_values("resid").head(10).iterrows():
             lines.append(
-                f"| [{r['lot_id']}]({r['url']}) | {r['year']:.0f} | {r['transmission'] or '?'} | "
+                f"| [{r['lot_id']}]({r['url']}) | {r['year']:.0f} | {r['trim'] or '?'} | {r['roof'] or '?'} | {r['transmission'] or '?'} | "
                 f"{'' if pd.isna(r['mileage_mi']) else f'{r.mileage_mi:.0f}'} | {r['primary_damage'] or ''} | "
                 f"{r['price']:.0f} | {r['fitted_price']:.0f} | {r['vs_model_pct']:+.0f}% |"
             )

@@ -28,6 +28,10 @@ BASE_HEADERS = {
 }
 
 
+class NotFoundError(RuntimeError):
+    """HTTP 404 – not retried."""
+
+
 class BlockedError(RuntimeError):
     """Raised when the site answers with a Cloudflare challenge / 403."""
 
@@ -105,6 +109,8 @@ class Fetcher:
 
     def _fetch_http(self, url: str) -> str:
         r = self._get_session().get(url, timeout=40)
+        if r.status_code == 404:
+            raise NotFoundError(url)
         if _looks_blocked(r.status_code, r.text):
             raise BlockedError(f"{url}: HTTP {r.status_code} (Cloudflare?)")
         r.raise_for_status()
@@ -145,6 +151,8 @@ class Fetcher:
                 if cp:
                     cp.write_text(html, encoding="utf-8")
                 return html
+            except NotFoundError:
+                raise
             except BlockedError as e:
                 last_err = e
                 log.warning("blocked (attempt %d/%d): %s", attempt, self.retries, e)

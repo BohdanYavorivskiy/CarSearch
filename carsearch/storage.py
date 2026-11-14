@@ -7,7 +7,7 @@ from pathlib import Path
 
 CSV_COLUMNS = [
     "lot_id", "sale_date_iso", "sale_status", "year", "generation", "title", "price_usd", "mileage_mi", "mileage_km",
-    "transmission_norm", "transmission", "engine", "primary_damage", "secondary_damage", "condition",
+    "transmission_norm", "transmission", "roof", "trim", "variant_source", "variant_conflict", "engine", "primary_damage", "secondary_damage", "condition",
     "keys", "airbags", "odometer_status", "repair_cost_usd", "acv_usd", "text_damage_score", "photo_severity",
     "photo_repair_bucket", "auction", "lot_number", "location", "documents", "seller", "color", "drive",
     "fuel", "vin", "url",
@@ -42,7 +42,7 @@ class Store:
         self.lots[key] = {**old, **lot}
 
     def skip(self, lot: dict):
-        self.skipped[str(lot["lot_id"])] = {"year": lot.get("year"), "transmission_norm": lot.get("transmission_norm")}
+        self.skipped[str(lot["lot_id"])] = {k: lot.get(k) for k in ("year", "transmission_norm", "roof", "trim")}
 
     def save(self):
         self.skipped_path.write_text(json.dumps(self.skipped, indent=0, sort_keys=True), encoding="utf-8")

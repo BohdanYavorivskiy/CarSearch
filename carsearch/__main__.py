@@ -14,15 +14,20 @@ def _fetcher(a) -> Fetcher:
 
 
 def cmd_scrape(a):
-    from .scrape import scrape
+    from .scrape import Filters, scrape
 
+    filters = Filters(
+        year_from=a.year_from or None, year_to=a.year_to,
+        transmission=None if a.transmission == "any" else a.transmission,
+        roof=None if a.roof == "any" else a.roof,
+        trims=[t for t in (a.trim or []) if t != "any"],
+        include_unknown=a.include_unknown,
+    )
+    print("filters:", filters)
     f = _fetcher(a)
     try:
-        stats = scrape(
-            f, Store(a.data), make=a.make, model_slugs=a.model or None,
-            year_from=a.year_from, year_to=a.year_to, transmission=a.transmission,
-            max_pages=a.max_pages, refresh=a.refresh,
-        )
+        stats = scrape(f, Store(a.data), make=a.make, model_slugs=a.model or None,
+                       filters=filters, max_pages=a.max_pages, refresh=a.refresh)
     finally:
         f.close()
     print("scrape:", stats)
@@ -70,9 +75,15 @@ def main(argv=None):
     net(s)
     s.add_argument("--make", default="mazda")
     s.add_argument("--model", action="append", help="model slug(s) on bidfax, default: mx-5-miata and mx-5")
-    s.add_argument("--year-from", type=int)
+    s.add_argument("--year-from", type=int, default=2016, help="default 2016 (ND); 0 = no limit")
     s.add_argument("--year-to", type=int)
     s.add_argument("--transmission", choices=["manual", "automatic", "any"], default="any")
+    s.add_argument("--roof", choices=["soft", "hard", "any"], default="any",
+                   help="soft = м'який дах, hard = твердий (RF / PRHT)")
+    s.add_argument("--trim", action="append", choices=["sport", "club", "grand_touring", "other", "any"],
+                   help="версія; можна кілька: --trim club --trim grand_touring")
+    s.add_argument("--include-unknown", action="store_true",
+                   help="не відкидати лоти, де дах/версію/коробку не вдалося визначити")
     s.add_argument("--max-pages", type=int, default=20)
     s.add_argument("--refresh", action="store_true", help="re-download lots already in the dataset")
     s.set_defaults(func=cmd_scrape)
