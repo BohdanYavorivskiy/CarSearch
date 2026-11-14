@@ -53,6 +53,23 @@ def cmd_photos(a):
     f.close()
 
 
+def cmd_import(a):
+    from .importer import load
+    from .scrape import Filters, matches
+
+    store = Store(a.data)
+    f = Filters(year_from=a.year_from or None, transmission=None if a.transmission == "any" else a.transmission,
+                roof=None if a.roof == "any" else a.roof, trims=[t for t in (a.trim or []) if t != "any"])
+    n = 0
+    for path in a.files:
+        for lot in load(path):
+            if matches(lot, f):
+                store.upsert(lot)
+                n += 1
+    store.save()
+    print(f"imported {n} lots")
+
+
 def cmd_report(a):
     from .analyze import report
 
@@ -95,6 +112,14 @@ def main(argv=None):
     ph.add_argument("--redo", action="store_true")
     ph.add_argument("--vision-model", help="default: env CARSEARCH_VISION_MODEL or claude-opus-5-5")
     ph.set_defaults(func=cmd_photos)
+
+    im = sub.add_parser("import", help="import lots from JSON gathered elsewhere (same filters as scrape)")
+    im.add_argument("files", nargs="+")
+    im.add_argument("--year-from", type=int, default=2016)
+    im.add_argument("--transmission", choices=["manual", "automatic", "any"], default="any")
+    im.add_argument("--roof", choices=["soft", "hard", "any"], default="any")
+    im.add_argument("--trim", action="append", choices=["sport", "club", "grand_touring", "other", "any"])
+    im.set_defaults(func=cmd_import)
 
     r = sub.add_parser("report", help="price vs condition analysis -> reports/report.md")
     r.add_argument("--out", default="reports")
