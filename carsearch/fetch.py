@@ -121,14 +121,20 @@ class Fetcher:
             from playwright.sync_api import sync_playwright  # type: ignore
 
             self._pw = sync_playwright().start()
-            headless = os.environ.get("BIDFAX_HEADLESS", "1") != "0"
-            browser = self._pw.chromium.launch(headless=headless)
-            ctx = browser.new_context(user_agent=self.user_agent, locale="uk-UA")
-            if self.cookies:
-                ctx.add_cookies(
-                    [{"name": k, "value": v, "domain": ".bidfax.info", "path": "/"} for k, v in self.cookies.items()]
-                )
-            self._page = ctx.new_page()
+            try:
+                headless = os.environ.get("BIDFAX_HEADLESS", "1") != "0"
+                browser = self._pw.chromium.launch(headless=headless)
+                ctx = browser.new_context(user_agent=self.user_agent, locale="uk-UA")
+                if self.cookies:
+                    ctx.add_cookies(
+                        [{"name": k, "value": v, "domain": ".bidfax.info", "path": "/"} for k, v in self.cookies.items()]
+                    )
+                self._page = ctx.new_page()
+            except Exception:
+                # Stop the driver, otherwise the next retry fails with the misleading
+                # "Sync API inside the asyncio loop" error instead of the real cause.
+                self.close()
+                raise
         resp = self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
         # Give a Cloudflare JS challenge time to resolve itself.
         for _ in range(15):
@@ -173,5 +179,9 @@ class Fetcher:
         return r.content
 
     def close(self):
-        if self._pw:
-            self._pw.stop()
+        pw, self._pw, self._page = self._pw, None, None
+        if pw:
+            try:
+                pw.stop()
+            except Exception as e:  # already dead / half-started driver
+                log.debug("playwright stop failed: %s", e)

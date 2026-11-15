@@ -238,3 +238,57 @@ class PhotoAnalyzerTests(unittest.TestCase):
         imgs = [c for c in captured["messages"][0]["content"] if c["type"] == "image"]
         self.assertEqual(len(imgs), 3)
         self.assertEqual(captured["output_config"]["format"]["type"], "json_schema")
+
+
+class PlaywrightRetryTests(unittest.TestCase):
+    """A failed browser launch must stop the driver so the retry starts cleanly."""
+
+    def test_failed_launch_stops_driver_and_retry_relaunches(self):
+        import sys
+        import types
+        from unittest import mock
+
+        from carsearch.fetch import Fetcher
+
+        state = {"started": 0, "stopped": 0, "launches": 0}
+
+        class FakePage:
+            def goto(self, url, **kw):
+                return types.SimpleNamespace(status=200)
+
+            def content(self):
+                return "<html><body>ok</body></html>"
+
+        class FakeChromium:
+            def launch(self, **kw):
+                state["launches"] += 1
+                if state["launches"] == 1:
+                    raise RuntimeError("Executable doesn't exist")
+                ctx = types.SimpleNamespace(new_page=FakePage, add_cookies=lambda c: None)
+                return types.SimpleNamespace(new_context=lambda **kw: ctx)
+
+        class FakeDriver:
+            chromium = FakeChromium()
+
+            def stop(self):
+                state["stopped"] += 1
+
+        class FakeManager:
+            def start(self):
+                # Real Playwright refuses a second start while the first is alive.
+                if state["started"] > state["stopped"]:
+                    raise RuntimeError("Sync API inside the asyncio loop")
+                state["started"] += 1
+                return FakeDriver()
+
+        fake_mod = types.ModuleType("playwright.sync_api")
+        fake_mod.sync_playwright = FakeManager
+        with mock.patch.dict(sys.modules, {"playwright": types.ModuleType("playwright"), "playwright.sync_api": fake_mod}), \
+                mock.patch("carsearch.fetch.time.sleep"):
+            f = Fetcher(backend="playwright", delay=0, cache_dir=None)
+            html = f.get("https://bidfax.info/x/")
+            f.close()
+
+        self.assertIn("ok", html)
+        self.assertEqual(state["launches"], 2)
+        self.assertEqual(state["started"], state["stopped"])
